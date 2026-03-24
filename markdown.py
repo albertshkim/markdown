@@ -30,7 +30,7 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════
 # 비밀번호 설정
 # ══════════════════════════════════════════════════════════
-APP_PASSWORD = "123" + datetime.now().strftime("%Y%m%d") + "1"
+APP_PASSWORD = "123" + datetime.now().strftime("%d") + "1"
 MAX_ATTEMPTS = 2
 
 if "auth_ok"       not in st.session_state: st.session_state.auth_ok       = False
