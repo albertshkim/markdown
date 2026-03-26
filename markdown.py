@@ -120,7 +120,11 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════
 # 비밀번호 설정
 # ══════════════════════════════════════════════════════════
-APP_PASSWORD = "123" + datetime.now().strftime("%d") + "1"
+# Secrets의 prefix + 오늘 날짜(일) + suffix 조합
+_prefix = st.secrets["app"]["password_prefix"]
+_suffix = st.secrets["app"]["password_suffix"]
+APP_PASSWORD = _prefix + datetime.now().strftime("%d") + _suffix
+
 MAX_ATTEMPTS = 2
 
 if "auth_ok"       not in st.session_state: st.session_state.auth_ok       = False
