@@ -3,10 +3,100 @@ from datetime import datetime
 import re
 import json
 import os
+import io
 import subprocess
 import platform
 import streamlit.components.v1 as components
 
+# Google API 관련 임포트
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
+# ══════════════════════════════════════════════════════════
+# [Cloud 최적화] Google Drive 관련 설정 및 함수
+# ══════════════════════════════════════════════════════════
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"] # 본인 폴더 ID
+
+def get_google_drive_service():
+    """Secrets에서 인증 정보를 읽어 구글 드라이브 서비스 반환"""
+    creds = None
+    
+    # 1. 먼저 Secrets에서 기존 토큰(로그인 정보) 확인
+    if "google_token" in st.secrets:
+        token_info = dict(st.secrets["google_token"])
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+    
+    # 2. 토큰이 없거나 만료된 경우 갱신 시도
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                st.error(f"토큰 갱신 실패: {e}")
+                creds = None
+        
+        # 3. 만약 갱신도 안 된다면 (최초 인증 필요 시)
+        # Cloud 환경에서는 run_local_server가 안되므로 에러 메시지 출력
+        if not creds:
+            if "google_credentials" in st.secrets:
+                st.warning("⚠️ 최초 인증이 필요합니다. 로컬에서 실행하여 생성된 token.json 내용을 Secrets에 등록해주세요.")
+                # 참고: 배포 환경에서는 아래 코드가 작동하지 않을 가능성이 큼
+                # flow = InstalledAppFlow.from_client_config({"installed": st.secrets["google_credentials"]}, SCOPES)
+                # creds = flow.run_local_server(port=0) 
+            return None
+    
+    return build("drive", "v3", credentials=creds)
+
+def upload_markdown_to_drive(title, tags, content):
+    try:
+        service = get_google_drive_service()
+        if not service:
+            return False, "인증 정보(Secrets)가 설정되지 않았습니다."
+
+        fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
+               f"> **태그:** {tags}\n\n---\n\n{content}")
+        
+        file_metadata = {
+            "name": f"{title}.md", 
+            "mimeType": "text/markdown",
+            "parents": [TARGET_FOLDER_ID]
+        }
+        
+        media = MediaIoBaseUpload(
+            io.BytesIO(fmt.encode("utf-8")),
+            mimetype="text/markdown",
+            resumable=True
+        )
+        
+        file = service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink").execute()
+        return True, file.get("webViewLink")
+    except Exception as e:
+        return False, str(e)
+
+def list_drive_files(service):
+    try:
+        query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'text/markdown' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)", pageSize=20).execute()
+        return results.get("files", [])
+    except Exception as e:
+        st.error(f"리스트 호출 오류: {e}")
+        return []
+
+def get_file_content(service, file_id):
+    try:
+        content = service.files().get_media(fileId=file_id).execute()
+        return content.decode("utf-8")
+    except Exception as e:
+        st.error(f"파일 읽기 오류: {e}")
+        return ""
+
+# ══════════════════════════════════════════════════════════
+# 메인 앱 설정 및 UI (이전 코드와 동일하게 유지하되 사이드바 버튼 부분만 수정)
+# ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI Response Archiver", layout="wide", page_icon="🤖")
 
 st.markdown("""
@@ -30,7 +120,11 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════
 # 비밀번호 설정
 # ══════════════════════════════════════════════════════════
-APP_PASSWORD = "123" + datetime.now().strftime("%d") + "1"
+# Secrets의 prefix + 오늘 날짜(일) + suffix 조합
+_prefix = st.secrets["app"]["password_prefix"]
+_suffix = st.secrets["app"]["password_suffix"]
+APP_PASSWORD = _prefix + datetime.now().strftime("%d") + _suffix
+
 MAX_ATTEMPTS = 2
 
 if "auth_ok"       not in st.session_state: st.session_state.auth_ok       = False
@@ -499,6 +593,47 @@ with st.sidebar:
     if st.button(toggle_label, use_container_width=True, type=toggle_type, key="btn_fs_toggle"):
         st.session_state.sidebar_fullscreen = not fs_on
         st.rerun()
+
+    # [수정] Google Drive 저장 버튼
+    st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+    if st.button("☁️ Google Drive에 저장", use_container_width=True, type="primary"):
+        if st.session_state.get("doc_title") and st.session_state.get("raw_content"):
+            with st.spinner("드라이브 업로드 중..."):
+                success, result = upload_markdown_to_drive(
+                    st.session_state.doc_title, 
+                    st.session_state.tags, 
+                    st.session_state.raw_content
+                )
+                if success:
+                    st.success("✅ 업로드 완료!")
+                    st.link_button("📄 확인하기", result, use_container_width=True)
+                else:
+                    st.error(f"오류: {result}")
+        else:
+            st.warning("내용이 없습니다.")
+
+    # [수정] Google Drive 리스트 버튼
+    if st.button("📂 Google Drive 리스트 불러오기", use_container_width=True):
+        service = get_google_drive_service()
+        if service:
+            with st.spinner("목록 불러오는 중..."):
+                files = list_drive_files(service)
+                st.session_state["drive_files"] = files
+        else:
+            st.error("구글 인증 정보를 확인해주세요 (Secrets).")
+
+    # 리스트 출력 및 클릭 로직
+    if "drive_files" in st.session_state and st.session_state["drive_files"]:
+        st.markdown("---")
+        for f in st.session_state["drive_files"]:
+            if st.button(f"📄 {f['name']}", key=f"drive_{f['id']}", use_container_width=True):
+                service = get_google_drive_service()
+                with st.spinner("파일 읽는 중..."):
+                    raw_text = get_file_content(service, f["id"])
+                    if raw_text:
+                        st.session_state.doc_title = f["name"].replace(".md", "")
+                        st.session_state.raw_content = raw_text
+                        st.rerun()
 
 # ── 메인 타이틀 ──────────────────────────────────────────
 st.title("🤖 AI 답변 마크다운 보관함")
