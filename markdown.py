@@ -30,7 +30,6 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════
 # 비밀번호 설정
 # ══════════════════════════════════════════════════════════
-# APP_PASSWORD = "123" + datetime.now().strftime("%Y%m%d") + "1"
 APP_PASSWORD = "123" + datetime.now().strftime("%d") + "1"
 MAX_ATTEMPTS = 2
 
@@ -448,7 +447,9 @@ def confirm_delete_current():
 # ── 세션 초기화 (앱 상태) ─────────────────────────────────
 for k, v in [("doc_title", ""), ("tags", ""), ("raw_content", ""),
              ("scroll_anchor", None), ("toc_expanded", True), ("preview_dark", True),
-             ("left_view_mode", "전체화면 보기")]:
+             ("left_view_mode", "전체화면 보기"),
+             ("sidebar_fullscreen", False),   # 사이드바 클릭 시 전체화면 옵션
+             ("open_fullscreen_now", False)]:  # 전체화면 다이얼로그 트리거
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -463,14 +464,49 @@ with st.sidebar:
                 st.session_state.update(
                     doc_title=t, tags=recent_docs[t]['tags'],
                     raw_content=recent_docs[t]['content'], scroll_anchor=None)
+                # 전체화면 옵션이 켜져 있으면 다이얼로그 트리거
+                if st.session_state.sidebar_fullscreen:
+                    st.session_state.open_fullscreen_now = True
                 st.rerun()
     else:
         st.write("최근 기록이 없습니다.")
+
     if st.button("🗑️ 기록 모두 삭제"):
         if os.path.exists(DB_FILE): os.remove(DB_FILE); st.rerun()
 
+    st.markdown("---")
+
+    # ── Full 화면으로 보기 옵션 ───────────────────────────
+    fs_on = st.session_state.sidebar_fullscreen
+    if fs_on:
+        st.markdown(
+            '<div style="background:rgba(233,69,96,0.12);border:1px solid rgba(233,69,96,0.45);'
+            'border-radius:8px;padding:8px 12px;font-size:12px;color:#e94560;margin-bottom:6px">'
+            '🖥️ <strong>Full화면 보기 ON</strong><br>'
+            '<span style="color:#8892b0;font-size:11px">'
+            '문서 클릭 시 전체화면으로 열립니다</span></div>',
+            unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div style="background:rgba(30,45,80,0.4);border:1px solid #1e2d50;'
+            'border-radius:8px;padding:8px 12px;font-size:12px;color:#8892b0;margin-bottom:6px">'
+            '🖥️ <strong style="color:#a8b2d8">Full화면 보기 OFF</strong><br>'
+            '<span style="font-size:11px">문서 클릭 시 현재 화면 유지</span></div>',
+            unsafe_allow_html=True)
+
+    toggle_label = "✅ Full화면 보기 끄기" if fs_on else "🖥️ Full화면 보기 켜기"
+    toggle_type  = "primary" if fs_on else "secondary"
+    if st.button(toggle_label, use_container_width=True, type=toggle_type, key="btn_fs_toggle"):
+        st.session_state.sidebar_fullscreen = not fs_on
+        st.rerun()
+
 # ── 메인 타이틀 ──────────────────────────────────────────
 st.title("🤖 AI 답변 마크다운 보관함")
+
+# 사이드바 전체화면 옵션으로 문서를 열었을 때 다이얼로그 자동 실행
+if st.session_state.open_fullscreen_now and st.session_state.raw_content:
+    st.session_state.open_fullscreen_now = False
+    show_full_screen(st.session_state.doc_title, st.session_state.raw_content)
 
 uploaded_file = st.file_uploader("마크다운(.md) 파일을 드래그하여 불러오세요", type=["md"])
 if uploaded_file:
