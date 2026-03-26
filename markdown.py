@@ -19,7 +19,7 @@ from google.auth.transport.requests import Request
 # [Cloud 최적화] Google Drive 관련 설정 및 함수
 # ══════════════════════════════════════════════════════════
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-TARGET_FOLDER_ID = "1jgCzjKWxVibOX8UZxWThw_wpTf1iDEz3" # 본인 폴더 ID
+TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"] # 본인 폴더 ID
 
 def get_google_drive_service():
     """Secrets에서 인증 정보를 읽어 구글 드라이브 서비스 반환"""
