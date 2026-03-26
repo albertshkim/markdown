@@ -3,11 +3,109 @@ from datetime import datetime
 import re
 import json
 import os
+import io
 import subprocess
 import platform
 import streamlit.components.v1 as components
 
+# Google API 관련 임포트
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
+# ══════════════════════════════════════════════════════════
+# [추가] Google Drive 관련 설정 및 함수
+# ══════════════════════════════════════════════════════════
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+TOKEN_FILE = "token.json"
+CREDENTIALS_FILE = "client_secret_desktop.json"
+
+# ⭐ 여기에서 본인의 구글 드라이브 폴더 ID를 입력하세요.
+# (폴더 접속 시 URL 마지막 부분: https://drive.google.com/drive/u/0/folders/폴더ID)
+TARGET_FOLDER_ID = "1jgCzjKWxVibOX8UZxWThw_wpTf1iDEz3"
+
+def get_google_drive_service():
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(CREDENTIALS_FILE):
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_FILE, "w") as token:
+            token.write(creds.to_json())
+    
+    return build("drive", "v3", credentials=creds)
+
+def upload_markdown_to_drive(title, tags, content):
+    try:
+        service = get_google_drive_service()
+        if not service:
+            return False, "credentials.json 파일이 없습니다."
+
+        # 마크다운 포맷팅
+        fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
+               f"> **태그:** {tags}\n\n---\n\n{content}")
+        
+        # [수정된 부분] 특정 폴더를 부모(parents)로 지정
+        file_metadata = {
+            "name": f"{title}.md", 
+            "mimeType": "text/markdown",
+            "parents": [TARGET_FOLDER_ID]  # 지정된 폴더 ID 리스트 추가
+        }
+        
+        media = MediaIoBaseUpload(
+            io.BytesIO(fmt.encode("utf-8")),
+            mimetype="text/markdown",
+            resumable=True
+        )
+        
+        file = service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields="id, webViewLink"
+        ).execute()
+        
+        return True, file.get("webViewLink")
+    except Exception as e:
+        return False, str(e)
+
+# ── Google Drive 파일 리스트 및 내용 가져오기 함수 추가 ────────────────
+def list_drive_files(service):
+    """지정된 폴더 내의 마크다운 파일 리스트를 가져옴"""
+    try:
+        query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'text/markdown' and trashed = false"
+        results = service.files().list(
+            q=query, 
+            fields="files(id, name)",
+            pageSize=20
+        ).execute()
+        return results.get("files", [])
+    except Exception as e:
+        st.error(f"리스트 호출 오류: {e}")
+        return []
+
+def get_file_content(service, file_id):
+    """파일 ID를 이용해 내용을 읽어옴"""
+    try:
+        content = service.files().get_media(fileId=file_id).execute()
+        return content.decode("utf-8")
+    except Exception as e:
+        st.error(f"파일 읽기 오류: {e}")
+        return ""
+    
+# ══════════════════════════════════════════════════════════
+# 메인 앱 설정 (기존 코드 유지)
+# ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI Response Archiver", layout="wide", page_icon="🤖")
+
 
 st.markdown("""
 <style>
@@ -499,6 +597,53 @@ with st.sidebar:
     if st.button(toggle_label, use_container_width=True, type=toggle_type, key="btn_fs_toggle"):
         st.session_state.sidebar_fullscreen = not fs_on
         st.rerun()
+
+    # [추가] Google 저장하기 버튼 (Full화면 보기 아래 위치)
+    st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+    if st.button("☁️ Google Drive에 저장", use_container_width=True, type="primary"):
+        if st.session_state.doc_title and st.session_state.raw_content:
+            with st.spinner("구글 드라이브 업로드 중..."):
+                success, result = upload_markdown_to_drive(
+                    st.session_state.doc_title, 
+                    st.session_state.tags, 
+                    st.session_state.raw_content
+                )
+                if success:
+                    st.success("✅ 업로드 성공!")
+                    st.link_button("📄 드라이브에서 확인", result, use_container_width=True)
+                else:
+                    st.error(f"❌ 실패: {result}")
+        else:
+            st.warning("⚠️ 저장할 내용이 없습니다.")
+
+    # [추가] Google Drive 리스트 버튼
+    st.markdown("<div style='margin-top:5px'></div>", unsafe_allow_html=True)
+    if st.button("📂 Google Drive 리스트 불러오기", use_container_width=True):
+        service = get_google_drive_service()
+        if service:
+            with st.spinner("목록 업데이트 중..."):
+                files = list_drive_files(service)
+                st.session_state["drive_files"] = files
+        else:
+            st.error("인증 파일(credentials.json)을 확인해주세요.")
+
+    # [추가] 불러온 리스트 표시 및 클릭 시 읽기
+    if "drive_files" in st.session_state and st.session_state["drive_files"]:
+        st.markdown("---")
+        st.caption("📍 최근 업로드된 마크다운 파일 (클릭 시 로드)")
+        for f in st.session_state["drive_files"]:
+            # 파일명을 버튼으로 만들어 클릭 시 내용을 가져오도록 설정
+            if st.button(f"📄 {f['name']}", key=f["id"], use_container_width=True):
+                service = get_google_drive_service()
+                with st.spinner("내용 읽어오는 중..."):
+                    raw_text = get_file_content(service, f["id"])
+                    if raw_text:
+                        # 파일명에서 .md 확장자 제거하여 제목으로 설정
+                        title_clean = f["name"].replace(".md", "")
+                        st.session_state.doc_title = title_clean
+                        st.session_state.raw_content = raw_text
+                        st.success(f"'{title_clean}' 로드 완료!")
+                        st.rerun()
 
 # ── 메인 타이틀 ──────────────────────────────────────────
 st.title("🤖 AI 답변 마크다운 보관함")
