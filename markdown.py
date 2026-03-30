@@ -21,6 +21,14 @@ from google.auth.transport.requests import Request
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"] # 본인 폴더 ID
 
+# ── [추가] 파일명 생성 유틸 ───────────────────────────────
+def make_safe_filename(title):
+    """YYYYMMDD_제목(스페이스→_) 형식의 파일명 생성"""
+    date_prefix = datetime.now().strftime("%Y%m%d")
+    safe_title = title.strip().replace(" ", "_")
+    safe_title = re.sub(r'[\\/*?:"<>|]', "", safe_title)
+    return f"{date_prefix}_{safe_title}"
+
 def get_google_drive_service():
     """Secrets에서 인증 정보를 읽어 구글 드라이브 서비스 반환"""
     creds = None
@@ -40,13 +48,9 @@ def get_google_drive_service():
                 creds = None
         
         # 3. 만약 갱신도 안 된다면 (최초 인증 필요 시)
-        # Cloud 환경에서는 run_local_server가 안되므로 에러 메시지 출력
         if not creds:
             if "google_credentials" in st.secrets:
                 st.warning("⚠️ 최초 인증이 필요합니다. 로컬에서 실행하여 생성된 token.json 내용을 Secrets에 등록해주세요.")
-                # 참고: 배포 환경에서는 아래 코드가 작동하지 않을 가능성이 큼
-                # flow = InstalledAppFlow.from_client_config({"installed": st.secrets["google_credentials"]}, SCOPES)
-                # creds = flow.run_local_server(port=0) 
             return None
     
     return build("drive", "v3", credentials=creds)
@@ -59,9 +63,12 @@ def upload_markdown_to_drive(title, tags, content):
 
         fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
                f"> **태그:** {tags}\n\n---\n\n{content}")
-        
+
+        # [수정] YYYYMMDD_제목 형식 파일명 적용
+        file_name = make_safe_filename(title) + ".md"
+
         file_metadata = {
-            "name": f"{title}.md", 
+            "name": file_name,
             "mimeType": "text/markdown",
             "parents": [TARGET_FOLDER_ID]
         }
@@ -95,7 +102,7 @@ def get_file_content(service, file_id):
         return ""
 
 # ══════════════════════════════════════════════════════════
-# 메인 앱 설정 및 UI (이전 코드와 동일하게 유지하되 사이드바 버튼 부분만 수정)
+# 메인 앱 설정 및 UI
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI Response Archiver", layout="wide", page_icon="🤖")
 
@@ -120,7 +127,6 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════
 # 비밀번호 설정
 # ══════════════════════════════════════════════════════════
-# Secrets의 prefix + 오늘 날짜(일) + suffix 조합
 _prefix = st.secrets["app"]["password_prefix"]
 _suffix = st.secrets["app"]["password_suffix"]
 APP_PASSWORD = _prefix + datetime.now().strftime("%d") + _suffix
@@ -222,8 +228,8 @@ def save_to_recent(title, tags, content):
         json.dump(docs, f, ensure_ascii=False, indent=4)
 
 def get_export_file_path(title):
-    safe = re.sub(r'[\\/*?:"<>|]', "_", title)
-    return os.path.join(EXPORT_DIR, f"{safe}.md")
+    """[수정] YYYYMMDD_제목 형식 경로 반환"""
+    return os.path.join(EXPORT_DIR, make_safe_filename(title) + ".md")
 
 def save_file_to_disk(title, tags, content):
     fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
@@ -522,13 +528,11 @@ def confirm_delete_current():
     c1, c2 = st.columns(2)
     with c1:
         if st.button("✅ 삭제 확인", use_container_width=True, type="primary"):
-            # 최근 목록에서 제거
             docs = load_recent_docs()
             if dt in docs:
                 del docs[dt]
                 with open(DB_FILE, "w", encoding="utf-8") as f:
                     json.dump(docs, f, ensure_ascii=False, indent=4)
-            # 세션 초기화
             st.session_state.doc_title   = ""
             st.session_state.tags        = ""
             st.session_state.raw_content = ""
@@ -542,8 +546,8 @@ def confirm_delete_current():
 for k, v in [("doc_title", ""), ("tags", ""), ("raw_content", ""),
              ("scroll_anchor", None), ("toc_expanded", True), ("preview_dark", True),
              ("left_view_mode", "전체화면 보기"),
-             ("sidebar_fullscreen", False),   # 사이드바 클릭 시 전체화면 옵션
-             ("open_fullscreen_now", False)]:  # 전체화면 다이얼로그 트리거
+             ("sidebar_fullscreen", False),
+             ("open_fullscreen_now", False)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -558,7 +562,6 @@ with st.sidebar:
                 st.session_state.update(
                     doc_title=t, tags=recent_docs[t]['tags'],
                     raw_content=recent_docs[t]['content'], scroll_anchor=None)
-                # 전체화면 옵션이 켜져 있으면 다이얼로그 트리거
                 if st.session_state.sidebar_fullscreen:
                     st.session_state.open_fullscreen_now = True
                 st.rerun()
@@ -570,7 +573,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── Full 화면으로 보기 옵션 ───────────────────────────
     fs_on = st.session_state.sidebar_fullscreen
     if fs_on:
         st.markdown(
@@ -594,7 +596,6 @@ with st.sidebar:
         st.session_state.sidebar_fullscreen = not fs_on
         st.rerun()
 
-    # [수정] Google Drive 저장 버튼
     st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
     if st.button("☁️ Google Drive에 저장", use_container_width=True, type="primary"):
         if st.session_state.get("doc_title") and st.session_state.get("raw_content"):
@@ -612,7 +613,6 @@ with st.sidebar:
         else:
             st.warning("내용이 없습니다.")
 
-    # [수정] Google Drive 리스트 버튼
     if st.button("📂 Google Drive 리스트 불러오기", use_container_width=True):
         service = get_google_drive_service()
         if service:
@@ -622,7 +622,6 @@ with st.sidebar:
         else:
             st.error("구글 인증 정보를 확인해주세요 (Secrets).")
 
-    # 리스트 출력 및 클릭 로직
     if "drive_files" in st.session_state and st.session_state["drive_files"]:
         st.markdown("---")
         for f in st.session_state["drive_files"]:
@@ -638,7 +637,6 @@ with st.sidebar:
 # ── 메인 타이틀 ──────────────────────────────────────────
 st.title("🤖 AI 답변 마크다운 보관함")
 
-# 사이드바 전체화면 옵션으로 문서를 열었을 때 다이얼로그 자동 실행
 if st.session_state.open_fullscreen_now and st.session_state.raw_content:
     st.session_state.open_fullscreen_now = False
     show_full_screen(st.session_state.doc_title, st.session_state.raw_content)
@@ -657,7 +655,6 @@ col1, col2 = st.columns([1, 1])
 # ═══════════════════════════════════════════════════════════
 with col1:
 
-    # ── 화면 보기 옵션 ────────────────────────────────────
     st.markdown("##### 📐 화면 보기 옵션")
     seg1, seg2 = st.columns(2)
     cur_mode   = st.session_state.left_view_mode
@@ -713,7 +710,6 @@ with col1:
         if not dt:
             st.info("✏️ 편집화면 보기 모드에서 내용을 입력하거나 파일을 불러오세요.")
 
-        # ── 현재 문서 삭제 버튼 (전체화면 모드) ──────────────
         if dt:
             if st.button("🗑️ 현재 문서 삭제", use_container_width=True, key="del_full"):
                 confirm_delete_current()
@@ -743,19 +739,37 @@ with col1:
         tags        = st.text_input("태그",      value=st.session_state.tags)
         raw_content = st.text_area("본문 내용",  value=st.session_state.raw_content, height=400)
 
-        # 편집값 즉시 세션 반영
         st.session_state.doc_title   = doc_title
         st.session_state.tags        = tags
         st.session_state.raw_content = raw_content
 
+        # [수정] YYYYMMDD_제목 형식 파일명 적용
+        safe_filename = make_safe_filename(doc_title) if doc_title else "새문서"
         fmt_save = (f"# {doc_title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
                     f"> **태그:** {tags}\n\n---\n\n{raw_content}")
-        dl_col, del_col = st.columns([3, 1])
+
+        # [수정] 버튼 3개: 내보내기 | 새작성 | 삭제
+        dl_col, new_col, del_col = st.columns([3, 1.3, 1])
+
         with dl_col:
-            if st.download_button("📥 수정된 파일 바로 내보내기", data=fmt_save,
-                                  file_name=f"{doc_title}.md", mime="text/markdown",
-                                  use_container_width=True):
+            if st.download_button(
+                "📥 수정된 파일 바로 내보내기",
+                data=fmt_save,
+                file_name=f"{safe_filename}.md",   # ← YYYYMMDD_제목 형식
+                mime="text/markdown",
+                use_container_width=True
+            ):
                 save_to_recent(doc_title, tags, raw_content)
+
+        with new_col:
+            # [추가] 새작성 버튼 — 클릭 시 편집화면 초기화
+            if st.button("✏️ 새작성", use_container_width=True, key="btn_new_doc"):
+                st.session_state.doc_title   = ""
+                st.session_state.tags        = ""
+                st.session_state.raw_content = ""
+                st.session_state.scroll_anchor = None
+                st.rerun()
+
         with del_col:
             if st.button("🗑️ 삭제", use_container_width=True,
                          key="del_edit", disabled=not bool(doc_title)):
