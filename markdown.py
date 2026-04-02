@@ -8,11 +8,10 @@ import subprocess
 import platform
 import streamlit.components.v1 as components
 
+# streamlit용 서비스 계정 이용 경우 
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2.service_account import Credentials  # ◀◀ 서비스 계정 전용으로 변경
 
 # ══════════════════════════════════════════════════════════
 # Google Drive 설정
@@ -35,25 +34,21 @@ def make_safe_filename(title):
 
 
 def get_google_drive_service():
-    """Secrets에서 인증 정보를 읽어 구글 드라이브 서비스 반환"""
-    creds = None
-    if "google_token" in st.secrets:
-        token_info = dict(st.secrets["google_token"])
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                st.error(f"토큰 갱신 실패: {e}")
-                creds = None
-        if not creds:
-            if "google_credentials" in st.secrets:
-                st.warning("⚠️ 최초 인증이 필요합니다. 로컬에서 실행하여 생성된 token.json 내용을 Secrets에 등록해주세요.")
-            return None
-    return build("drive", "v3", credentials=creds)
-
-
+    """Secrets에서 서비스 계정 정보를 읽어 구글 드라이브 서비스 반환"""
+    try:
+        # 1. st.secrets에 저장해둔 서비스 계정 정보(딕셔너리) 불러오기
+        secret_dict = dict(st.secrets["gcp_service_account"])
+        
+        # 2. 서비스 계정 인증 객체 생성
+        creds = Credentials.from_service_account_info(secret_dict, scopes=SCOPES)
+        
+        # 3. Drive API 서비스 빌드 및 반환
+        return build("drive", "v3", credentials=creds)
+        
+    except Exception as e:
+        st.error(f"구글 인증 실패: Secrets 설정을 확인해주세요. ({e})")
+        return None
+        
 
 def upload_markdown_to_drive(title, tags, content):
     try:
