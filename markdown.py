@@ -17,18 +17,20 @@ from google.auth.transport.requests import Request
 # ══════════════════════════════════════════════════════════
 # Google Drive 설정
 # ══════════════════════════════════════════════════════════
-SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
+# [수정] 구글 문서 읽기 권한 추가
+# ── 수정 ──
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+TOKEN_FILE       = "token.json"
+CREDENTIALS_FILE = "client_secret_desktop.json"
 TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"]
 
 
 def make_safe_filename(title):
     """YYYYMMDD_제목(스페이스→_) 형식의 파일명 생성"""
     date_prefix = datetime.now().strftime("%Y%m%d")
-    safe_title = title.strip().replace(" ", "_")
-    safe_title = re.sub(r'[\\/*?:"<>|]', "", safe_title)
+    safe_title  = title.strip().replace(" ", "_")
+    safe_title  = re.sub(r'[\\/*?:"<>|]', "", safe_title)
     return f"{date_prefix}_{safe_title}"
 
 
@@ -50,6 +52,7 @@ def get_google_drive_service():
                 st.warning("⚠️ 최초 인증이 필요합니다. 로컬에서 실행하여 생성된 token.json 내용을 Secrets에 등록해주세요.")
             return None
     return build("drive", "v3", credentials=creds)
+
 
 
 def upload_markdown_to_drive(title, tags, content):
@@ -76,27 +79,31 @@ def upload_markdown_to_drive(title, tags, content):
         return False, str(e)
 
 
+# [수정] 마크다운 + 구글 문서 둘 다 조회
 def list_drive_files(service):
     try:
-        query = (
-            f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
-            f" and ("
-            f"mimeType = 'text/markdown'"
-            f" or mimeType = 'application/vnd.google-apps.document'"
-            f")"
-        )
+        # ── mimeType 필터 완전 제거, 폴더 내 모든 파일 조회
+        query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
         results = service.files().list(
             q=query,
             fields="files(id, name, mimeType)",
-            pageSize=30,
+            pageSize=100,
             orderBy="modifiedTime desc",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
         ).execute()
-        return results.get("files", [])
+        files = results.get("files", [])
+
+        # 전체 파일과 mimeType 출력
+        # st.write(f"총 {len(files)}개 파일 발견")
+        # for f in files:
+        #     st.write(f"`{f['mimeType']}` | {f['name']}")
+
+        return files
     except Exception as e:
         st.error(f"리스트 호출 오류: {e}")
         return []
-
-
+    
 def get_file_content(service, file_id):
     """마크다운(.md) 파일 읽기"""
     try:
@@ -106,9 +113,22 @@ def get_file_content(service, file_id):
         st.error(f"파일 읽기 오류: {e}")
         return ""
 
+def convert_numbered_to_markdown(content):
+    """숫자. 으로 시작하는 줄에 ## 추가 + 위 줄과 사이에 빈 줄 삽입"""
+    lines  = content.split('\n')
+    result = []
+    for line in lines:
+        if re.match(r'^\d+\.\s', line):
+            # 바로 위 줄이 빈 줄이 아니면 빈 줄 먼저 추가
+            if result and result[-1].strip() != '':
+                result.append('')
+            result.append('## ' + line)
+        else:
+            result.append(line)
+    return '\n'.join(result)
 
+# [신규] 구글 문서 → plain text 추출
 def get_gdoc_content(service, file_id):
-    """Google Docs 파일을 plain text로 export하여 반환"""
     try:
         response = (
             service.files()
@@ -636,36 +656,83 @@ with st.sidebar:
     st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
 
     if st.button("☁️ Google Drive에 저장", use_container_width=True, type="primary"):
-        if st.session_state.get("doc_title") and st.session_state.get("raw_content"):
-            with st.spinner("드라이브 업로드 중..."):
+        if st.session_state.doc_title and st.session_state.raw_content:
+            with st.spinner("구글 드라이브 업로드 중..."):
                 success, result = upload_markdown_to_drive(
                     st.session_state.doc_title,
                     st.session_state.tags,
                     st.session_state.raw_content
                 )
                 if success:
-                    st.success("✅ 업로드 완료!")
-                    st.link_button("📄 확인하기", result, use_container_width=True)
+                    st.success("✅ 업로드 성공!")
+                    st.link_button("📄 드라이브에서 확인", result, use_container_width=True)
                 else:
-                    st.error(f"오류: {result}")
+                    st.error(f"❌ 실패: {result}")
         else:
-            st.warning("내용이 없습니다.")
+            st.warning("⚠️ 저장할 내용이 없습니다.")
+
+    st.markdown("<div style='margin-top:5px'></div>", unsafe_allow_html=True)
 
     if st.button("📂 Google Drive 리스트 불러오기", use_container_width=True):
         service = get_google_drive_service()
         if service:
-            with st.spinner("목록 불러오는 중..."):
+            with st.spinner("목록 업데이트 중..."):
                 files = list_drive_files(service)
                 st.session_state["drive_files"] = files
         else:
             st.error("구글 인증 정보를 확인해주세요 (Secrets).")
 
+    # [수정] 파일 타입별 섹션 분리 표시
     if "drive_files" in st.session_state and st.session_state["drive_files"]:
         st.markdown("---")
-        gdocs   = [f for f in st.session_state["drive_files"]
-                   if f["mimeType"] == "application/vnd.google-apps.document"]
-        mdfiles = [f for f in st.session_state["drive_files"]
-                   if f["mimeType"] == "text/markdown"]
+
+        # ── 구글 드라이브 폴더 직접 열기 버튼
+        st.link_button(
+            "📂 Google Drive 폴더 열기",
+            f"https://drive.google.com/drive/folders/{TARGET_FOLDER_ID}",
+            use_container_width=True
+        )
+
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+        # ── 검색창
+        search_query = st.text_input(
+            "🔍 파일 검색",
+            placeholder="파일명 입력...",
+            label_visibility="collapsed",
+            key="drive_search"
+        )
+
+        all_files = st.session_state["drive_files"]
+
+        # 검색어 필터링 (대소문자 무시)
+        if search_query.strip():
+            filtered = [f for f in all_files
+                        if search_query.strip().lower() in f["name"].lower()]
+        else:
+            filtered = all_files
+
+        gdocs   = [f for f in filtered if f["mimeType"] == "application/vnd.google-apps.document"]
+        mdfiles = [f for f in filtered if f["mimeType"] == "text/markdown"]
+
+        # 검색 결과 카운트
+        total = len(gdocs) + len(mdfiles)
+        if search_query.strip():
+            st.markdown(
+                f'<div style="color:#8892b0;font-size:11px;text-align:right;margin-bottom:4px">'
+                f'🔎 <strong style="color:#e94560">{total}</strong>개 검색됨</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div style="color:#8892b0;font-size:11px;text-align:right;margin-bottom:4px">'
+                f'전체 <strong style="color:#a8b2d8">{total}</strong>개</div>',
+                unsafe_allow_html=True)
+
+        if total == 0 and search_query.strip():
+            st.markdown(
+                '<div style="text-align:center;color:#8892b0;font-size:12px;'
+                'padding:12px 0;font-style:italic">검색 결과가 없습니다.</div>',
+                unsafe_allow_html=True)
 
         if gdocs:
             st.markdown(
@@ -691,7 +758,7 @@ with st.sidebar:
             for f in mdfiles:
                 if st.button(f"📄 {f['name']}", key=f"drive_{f['id']}", use_container_width=True):
                     service = get_google_drive_service()
-                    with st.spinner("파일 읽는 중..."):
+                    with st.spinner("내용 읽어오는 중..."):
                         raw_text = get_file_content(service, f["id"])
                         if raw_text:
                             t, tg, body = parse_markdown(raw_text)
@@ -814,7 +881,7 @@ with col1:
         fmt_save = (f"# {doc_title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
                     f"> **태그:** {tags}\n\n---\n\n{raw_content}")
 
-        dl_col, new_col, del_col = st.columns([3, 1.3, 1])
+        dl_col, md_col, new_col, del_col = st.columns([3, 1.3, 1.3, 1])
         with dl_col:
             if st.download_button(
                 "📥 수정된 파일 바로 내보내기",
@@ -824,6 +891,12 @@ with col1:
                 use_container_width=True
             ):
                 save_to_recent(doc_title, tags, raw_content)
+        with md_col:
+            if st.button("🔄 MD변환", use_container_width=True, key="btn_md_convert",
+                        help="숫자. 항목을 ## 헤딩으로 변환하고 앞에 빈 줄을 추가합니다"):
+                converted = convert_numbered_to_markdown(raw_content)
+                st.session_state.raw_content = converted
+                st.rerun()
         with new_col:
             if st.button("✏️ 새작성", use_container_width=True, key="btn_new_doc"):
                 st.session_state.doc_title     = ""
@@ -833,9 +906,9 @@ with col1:
                 st.rerun()
         with del_col:
             if st.button("🗑️ 삭제", use_container_width=True,
-                         key="del_edit", disabled=not bool(doc_title)):
+                        key="del_edit", disabled=not bool(doc_title)):
                 confirm_delete_current()
-
+                
         st.markdown("---")
         headings = extract_headings(raw_content)
         n = len(headings)
@@ -891,10 +964,10 @@ with col2:
             unsafe_allow_html=True)
 
     st.markdown("---")
-    scroll_anchor              = st.session_state.scroll_anchor
+    scroll_anchor                  = st.session_state.scroll_anchor
     st.session_state.scroll_anchor = None
-    raw_content                = st.session_state.raw_content
-    doc_title                  = st.session_state.doc_title
+    raw_content                    = st.session_state.raw_content
+    doc_title                      = st.session_state.doc_title
 
     if raw_content:
         h_list = extract_headings(raw_content)
