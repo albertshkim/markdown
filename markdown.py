@@ -8,92 +8,112 @@ import subprocess
 import platform
 import streamlit.components.v1 as components
 
-# Google API 관련 임포트
+# streamlit용 서비스 계정 이용 경우 
+# from googleapiclient.discovery import build
+# from googleapiclient.http import MediaIoBaseUpload
+# from google.oauth2.service_account import Credentials  # ◀◀ 서비스 계정 전용으로 변경
+
+# 구글 API 관련 필수 모듈 3가지
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.http import MediaIoBaseUpload  # ◀◀ 방금 에러를 해결할 업로드 필수 모듈
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-# ══════════════════════════════════════════════════════════
-# [Cloud 최적화] Google Drive 관련 설정 및 함수
-# ══════════════════════════════════════════════════════════
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"] # 본인 폴더 ID
 
-# ── [추가] 파일명 생성 유틸 ───────────────────────────────
+# ══════════════════════════════════════════════════════════
+# Google Drive 설정
+# ══════════════════════════════════════════════════════════
+# [수정] 구글 문서 읽기 권한 추가
+# ── 수정 ──
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+TOKEN_FILE       = "token.json"
+CREDENTIALS_FILE = "client_secret_desktop.json"
+TARGET_FOLDER_ID = st.secrets["google_drive"]["target_folder_id"]
+
+
 def make_safe_filename(title):
     """YYYYMMDD_제목(스페이스→_) 형식의 파일명 생성"""
     date_prefix = datetime.now().strftime("%Y%m%d")
-    safe_title = title.strip().replace(" ", "_")
-    safe_title = re.sub(r'[\\/*?:"<>|]', "", safe_title)
+    safe_title  = title.strip().replace(" ", "_")
+    safe_title  = re.sub(r'[\\/*?:"<>|]', "", safe_title)
     return f"{date_prefix}_{safe_title}"
 
+
 def get_google_drive_service():
-    """Secrets에서 인증 정보를 읽어 구글 드라이브 서비스 반환"""
-    creds = None
-    
-    # 1. 먼저 Secrets에서 기존 토큰(로그인 정보) 확인
-    if "google_token" in st.secrets:
-        token_info = dict(st.secrets["google_token"])
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
-    
-    # 2. 토큰이 없거나 만료된 경우 갱신 시도
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
+    """Secrets에서 OAuth 토큰을 읽어 구글 드라이브 서비스 반환"""
+    try:
+        if "google_token" in st.secrets:
+            token_info = dict(st.secrets["google_token"])
+            # 1. 토큰 딕셔너리로 인증 객체 생성
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+            
+            # 2. 토큰이 만료되었다면 refresh_token을 이용해 메모리상에서 즉시 갱신
+            if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
-            except Exception as e:
-                st.error(f"토큰 갱신 실패: {e}")
-                creds = None
-        
-        # 3. 만약 갱신도 안 된다면 (최초 인증 필요 시)
-        if not creds:
-            if "google_credentials" in st.secrets:
-                st.warning("⚠️ 최초 인증이 필요합니다. 로컬에서 실행하여 생성된 token.json 내용을 Secrets에 등록해주세요.")
+                
+            # 3. 서비스 빌드
+            return build("drive", "v3", credentials=creds)
+        else:
+            st.error("Secrets에 'google_token'이 없습니다.")
             return None
-    
-    return build("drive", "v3", credentials=creds)
+            
+    except Exception as e:
+        st.error(f"구글 인증 오류: {e}")
+        return None
+        
 
 def upload_markdown_to_drive(title, tags, content):
     try:
         service = get_google_drive_service()
         if not service:
             return False, "인증 정보(Secrets)가 설정되지 않았습니다."
-
         fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
                f"> **태그:** {tags}\n\n---\n\n{content}")
-
-        # [수정] YYYYMMDD_제목 형식 파일명 적용
         file_name = make_safe_filename(title) + ".md"
-
         file_metadata = {
             "name": file_name,
             "mimeType": "text/markdown",
             "parents": [TARGET_FOLDER_ID]
         }
-        
         media = MediaIoBaseUpload(
             io.BytesIO(fmt.encode("utf-8")),
             mimetype="text/markdown",
             resumable=True
         )
-        
         file = service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink").execute()
         return True, file.get("webViewLink")
     except Exception as e:
         return False, str(e)
 
+
+# [수정] 마크다운 + 구글 문서 둘 다 조회
 def list_drive_files(service):
     try:
-        query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'text/markdown' and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)", pageSize=20).execute()
-        return results.get("files", [])
+        # ── mimeType 필터 완전 제거, 폴더 내 모든 파일 조회
+        query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name, mimeType)",
+            pageSize=100,
+            orderBy="modifiedTime desc",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute()
+        files = results.get("files", [])
+
+        # 전체 파일과 mimeType 출력
+        # st.write(f"총 {len(files)}개 파일 발견")
+        # for f in files:
+        #     st.write(f"`{f['mimeType']}` | {f['name']}")
+
+        return files
     except Exception as e:
         st.error(f"리스트 호출 오류: {e}")
         return []
-
+    
 def get_file_content(service, file_id):
+    """마크다운(.md) 파일 읽기"""
     try:
         content = service.files().get_media(fileId=file_id).execute()
         return content.decode("utf-8")
@@ -101,8 +121,36 @@ def get_file_content(service, file_id):
         st.error(f"파일 읽기 오류: {e}")
         return ""
 
+def convert_numbered_to_markdown(content):
+    """숫자. 으로 시작하는 줄에 ## 추가 + 위 줄과 사이에 빈 줄 삽입"""
+    lines  = content.split('\n')
+    result = []
+    for line in lines:
+        if re.match(r'^\d+\.\s', line):
+            # 바로 위 줄이 빈 줄이 아니면 빈 줄 먼저 추가
+            if result and result[-1].strip() != '':
+                result.append('')
+            result.append('## ' + line)
+        else:
+            result.append(line)
+    return '\n'.join(result)
+
+# [신규] 구글 문서 → plain text 추출
+def get_gdoc_content(service, file_id):
+    try:
+        response = (
+            service.files()
+            .export(fileId=file_id, mimeType="text/plain")
+            .execute()
+        )
+        return response.decode("utf-8") if isinstance(response, bytes) else response
+    except Exception as e:
+        st.error(f"구글 문서 읽기 오류: {e}")
+        return ""
+
+
 # ══════════════════════════════════════════════════════════
-# 메인 앱 설정 및 UI
+# 앱 설정 및 CSS
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI Response Archiver", layout="wide", page_icon="🤖")
 
@@ -130,14 +178,12 @@ st.markdown("""
 _prefix = st.secrets["app"]["password_prefix"]
 _suffix = st.secrets["app"]["password_suffix"]
 APP_PASSWORD = _prefix + datetime.now().strftime("%d") + _suffix
-
 MAX_ATTEMPTS = 2
 
 if "auth_ok"       not in st.session_state: st.session_state.auth_ok       = False
 if "auth_attempts" not in st.session_state: st.session_state.auth_attempts = 0
 if "auth_blocked"  not in st.session_state: st.session_state.auth_blocked  = False
 
-# ── 차단 화면 ─────────────────────────────────────────────
 if st.session_state.auth_blocked:
     st.markdown("""
     <div style="display:flex;flex-direction:column;align-items:center;
@@ -159,10 +205,8 @@ if st.session_state.auth_blocked:
     """, unsafe_allow_html=True)
     st.stop()
 
-# ── 로그인 화면 ───────────────────────────────────────────
 if not st.session_state.auth_ok:
     remaining = MAX_ATTEMPTS - st.session_state.auth_attempts
-
     st.markdown("""
     <div style="display:flex;justify-content:center;padding-top:80px;">
       <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
@@ -177,7 +221,6 @@ if not st.session_state.auth_ok:
       </div>
     </div>
     """, unsafe_allow_html=True)
-
     _, mid, _ = st.columns([1, 1.1, 1])
     with mid:
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
@@ -202,21 +245,20 @@ if not st.session_state.auth_ok:
                 st.rerun()
     st.stop()
 
-
 # ══════════════════════════════════════════════════════════
 # 인증 통과 후 메인 앱
 # ══════════════════════════════════════════════════════════
-
-# ── 파일 관리 ─────────────────────────────────────────────
 DB_FILE    = "recent_docs.json"
 EXPORT_DIR = os.path.abspath("exported_docs")
 os.makedirs(EXPORT_DIR, exist_ok=True)
+
 
 def load_recent_docs():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
+
 
 def save_to_recent(title, tags, content):
     docs = load_recent_docs()
@@ -227,9 +269,10 @@ def save_to_recent(title, tags, content):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(docs, f, ensure_ascii=False, indent=4)
 
+
 def get_export_file_path(title):
-    """[수정] YYYYMMDD_제목 형식 경로 반환"""
     return os.path.join(EXPORT_DIR, make_safe_filename(title) + ".md")
+
 
 def save_file_to_disk(title, tags, content):
     fmt = (f"# {title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
@@ -238,6 +281,7 @@ def save_file_to_disk(title, tags, content):
     with open(path, "w", encoding="utf-8") as f:
         f.write(fmt)
     return path
+
 
 def open_in_explorer(path):
     sys = platform.system()
@@ -255,7 +299,10 @@ def open_in_explorer(path):
     except Exception as e:
         return str(e)
 
-# ── 마크다운 유틸 ─────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 마크다운 유틸
+# ══════════════════════════════════════════════════════════
 def parse_markdown(content):
     t = re.search(r'^#\s+(.*)', content, re.MULTILINE)
     g = re.search(r'>\s+\*\*태그:\*\*\s+(.*)', content)
@@ -264,10 +311,12 @@ def parse_markdown(content):
             g.group(1) if g else "",
             parts[1].strip() if len(parts) > 1 else content)
 
+
 def make_anchor(text, idx):
     a = re.sub(r'[^\w가-힣\s-]', '', text.lower())
     a = re.sub(r'\s+', '-', a.strip())
     return f"h{idx}-{a}"
+
 
 def extract_headings(content):
     headings, idx = [], 0
@@ -278,6 +327,7 @@ def extract_headings(content):
                              'anchor': make_anchor(m.group(2).strip(), idx), 'idx': idx})
             idx += 1
     return headings
+
 
 def inline_md(text, is_dark=True):
     tc    = "#e2e8f8" if is_dark else "#1a1a2a"
@@ -293,6 +343,7 @@ def inline_md(text, is_dark=True):
     text = re.sub(r'\[(.+?)\]\((.+?)\)',
         f'<a href="\\2" style="color:{lc};text-decoration:underline">\\1</a>', text)
     return text
+
 
 def md_to_html_with_anchors(content, headings, is_dark=True):
     if is_dark:
@@ -395,7 +446,10 @@ def md_to_html_with_anchors(content, headings, is_dark=True):
     out.extend(close_lists())
     return bg, title_c, title_bd, "\n".join(out)
 
-# ── 목차 렌더링 (공통 함수) ───────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 목차 렌더링
+# ══════════════════════════════════════════════════════════
 def render_toc(headings):
     if not headings:
         st.markdown(
@@ -473,11 +527,15 @@ function tocClick(id){{
     components.html(toc_html, height=toc_height + 6, scrolling=False)
     st.caption("💡 목차 클릭 시 오른쪽 미리보기의 해당 섹션으로 이동합니다.")
 
-# ── 다이얼로그 ────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 다이얼로그
+# ══════════════════════════════════════════════════════════
 @st.dialog("전체 화면 보기", width="large")
 def show_full_screen(title, content):
     st.markdown(f"# {title}")
     st.markdown(content)
+
 
 @st.dialog("📁 파일 경로 탐색", width="large")
 def show_file_path_dialog(title, tags, content):
@@ -512,6 +570,7 @@ def show_file_path_dialog(title, tags, content):
             st.text_input("Ctrl+A → Ctrl+C:", value=fpath)
     st.caption("💡 탐색기 열기는 로컬 환경에서만 동작합니다.")
 
+
 @st.dialog("🗑️ 현재 문서 삭제", width="small")
 def confirm_delete_current():
     dt = st.session_state.doc_title
@@ -533,16 +592,19 @@ def confirm_delete_current():
                 del docs[dt]
                 with open(DB_FILE, "w", encoding="utf-8") as f:
                     json.dump(docs, f, ensure_ascii=False, indent=4)
-            st.session_state.doc_title   = ""
-            st.session_state.tags        = ""
-            st.session_state.raw_content = ""
+            st.session_state.doc_title     = ""
+            st.session_state.tags          = ""
+            st.session_state.raw_content   = ""
             st.session_state.scroll_anchor = None
             st.rerun()
     with c2:
         if st.button("❌ 취소", use_container_width=True):
             st.rerun()
 
-# ── 세션 초기화 (앱 상태) ─────────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 세션 초기화
+# ══════════════════════════════════════════════════════════
 for k, v in [("doc_title", ""), ("tags", ""), ("raw_content", ""),
              ("scroll_anchor", None), ("toc_expanded", True), ("preview_dark", True),
              ("left_view_mode", "전체화면 보기"),
@@ -551,7 +613,10 @@ for k, v in [("doc_title", ""), ("tags", ""), ("raw_content", ""),
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── 사이드바 ─────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 사이드바
+# ══════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("📂 최근 작업 문서")
     recent_docs = load_recent_docs()
@@ -597,44 +662,123 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+
     if st.button("☁️ Google Drive에 저장", use_container_width=True, type="primary"):
-        if st.session_state.get("doc_title") and st.session_state.get("raw_content"):
-            with st.spinner("드라이브 업로드 중..."):
+        if st.session_state.doc_title and st.session_state.raw_content:
+            with st.spinner("구글 드라이브 업로드 중..."):
                 success, result = upload_markdown_to_drive(
-                    st.session_state.doc_title, 
-                    st.session_state.tags, 
+                    st.session_state.doc_title,
+                    st.session_state.tags,
                     st.session_state.raw_content
                 )
                 if success:
-                    st.success("✅ 업로드 완료!")
-                    st.link_button("📄 확인하기", result, use_container_width=True)
+                    st.success("✅ 업로드 성공!")
+                    st.link_button("📄 드라이브에서 확인", result, use_container_width=True)
                 else:
-                    st.error(f"오류: {result}")
+                    st.error(f"❌ 실패: {result}")
         else:
-            st.warning("내용이 없습니다.")
+            st.warning("⚠️ 저장할 내용이 없습니다.")
+
+    st.markdown("<div style='margin-top:5px'></div>", unsafe_allow_html=True)
 
     if st.button("📂 Google Drive 리스트 불러오기", use_container_width=True):
         service = get_google_drive_service()
         if service:
-            with st.spinner("목록 불러오는 중..."):
+            with st.spinner("목록 업데이트 중..."):
                 files = list_drive_files(service)
                 st.session_state["drive_files"] = files
         else:
             st.error("구글 인증 정보를 확인해주세요 (Secrets).")
 
+    # [수정] 파일 타입별 섹션 분리 표시
     if "drive_files" in st.session_state and st.session_state["drive_files"]:
         st.markdown("---")
-        for f in st.session_state["drive_files"]:
-            if st.button(f"📄 {f['name']}", key=f"drive_{f['id']}", use_container_width=True):
-                service = get_google_drive_service()
-                with st.spinner("파일 읽는 중..."):
-                    raw_text = get_file_content(service, f["id"])
-                    if raw_text:
-                        st.session_state.doc_title = f["name"].replace(".md", "")
-                        st.session_state.raw_content = raw_text
-                        st.rerun()
 
-# ── 메인 타이틀 ──────────────────────────────────────────
+        # ── 구글 드라이브 폴더 직접 열기 버튼
+        st.link_button(
+            "📂 Google Drive 폴더 열기",
+            f"https://drive.google.com/drive/folders/{TARGET_FOLDER_ID}",
+            use_container_width=True
+        )
+
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+        # ── 검색창
+        search_query = st.text_input(
+            "🔍 파일 검색",
+            placeholder="파일명 입력...",
+            label_visibility="collapsed",
+            key="drive_search"
+        )
+
+        all_files = st.session_state["drive_files"]
+
+        # 검색어 필터링 (대소문자 무시)
+        if search_query.strip():
+            filtered = [f for f in all_files
+                        if search_query.strip().lower() in f["name"].lower()]
+        else:
+            filtered = all_files
+
+        gdocs   = [f for f in filtered if f["mimeType"] == "application/vnd.google-apps.document"]
+        mdfiles = [f for f in filtered if f["mimeType"] == "text/markdown"]
+
+        # 검색 결과 카운트
+        total = len(gdocs) + len(mdfiles)
+        if search_query.strip():
+            st.markdown(
+                f'<div style="color:#8892b0;font-size:11px;text-align:right;margin-bottom:4px">'
+                f'🔎 <strong style="color:#e94560">{total}</strong>개 검색됨</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div style="color:#8892b0;font-size:11px;text-align:right;margin-bottom:4px">'
+                f'전체 <strong style="color:#a8b2d8">{total}</strong>개</div>',
+                unsafe_allow_html=True)
+
+        if total == 0 and search_query.strip():
+            st.markdown(
+                '<div style="text-align:center;color:#8892b0;font-size:12px;'
+                'padding:12px 0;font-style:italic">검색 결과가 없습니다.</div>',
+                unsafe_allow_html=True)
+
+        if gdocs:
+            st.markdown(
+                '<div style="color:#7b8cde;font-size:11px;font-weight:700;'
+                'letter-spacing:2px;margin:6px 0 4px">📝 GOOGLE DOCS</div>',
+                unsafe_allow_html=True)
+            for f in gdocs:
+                if st.button(f"📝 {f['name']}", key=f"drive_{f['id']}", use_container_width=True):
+                    service = get_google_drive_service()
+                    with st.spinner("구글 문서 읽는 중..."):
+                        raw_text = get_gdoc_content(service, f["id"])
+                        if raw_text:
+                            st.session_state.doc_title   = f["name"]
+                            st.session_state.tags        = ""
+                            st.session_state.raw_content = raw_text
+                            st.rerun()
+
+        if mdfiles:
+            st.markdown(
+                '<div style="color:#5fb7d4;font-size:11px;font-weight:700;'
+                'letter-spacing:2px;margin:10px 0 4px">📄 MARKDOWN</div>',
+                unsafe_allow_html=True)
+            for f in mdfiles:
+                if st.button(f"📄 {f['name']}", key=f"drive_{f['id']}", use_container_width=True):
+                    service = get_google_drive_service()
+                    with st.spinner("내용 읽어오는 중..."):
+                        raw_text = get_file_content(service, f["id"])
+                        if raw_text:
+                            t, tg, body = parse_markdown(raw_text)
+                            st.session_state.doc_title   = t
+                            st.session_state.tags        = tg
+                            st.session_state.raw_content = body
+                            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════
+# 메인 타이틀
+# ══════════════════════════════════════════════════════════
 st.title("🤖 AI 답변 마크다운 보관함")
 
 if st.session_state.open_fullscreen_now and st.session_state.raw_content:
@@ -650,11 +794,11 @@ if uploaded_file:
 
 col1, col2 = st.columns([1, 1])
 
-# ═══════════════════════════════════════════════════════════
-# 왼쪽 컬럼
-# ═══════════════════════════════════════════════════════════
-with col1:
 
+# ══════════════════════════════════════════════════════════
+# 왼쪽 컬럼
+# ══════════════════════════════════════════════════════════
+with col1:
     st.markdown("##### 📐 화면 보기 옵션")
     seg1, seg2 = st.columns(2)
     cur_mode   = st.session_state.left_view_mode
@@ -687,10 +831,9 @@ with col1:
 
     st.markdown("---")
 
-    # ── 전체화면 보기 모드 ───────────────────────────────
+    # ── 전체화면 보기 모드
     if cur_mode == "전체화면 보기":
         st.subheader("📄 문서 정보")
-
         dt = st.session_state.doc_title
         tg = st.session_state.tags
         if dt:
@@ -709,7 +852,6 @@ with col1:
                 unsafe_allow_html=True)
         if not dt:
             st.info("✏️ 편집화면 보기 모드에서 내용을 입력하거나 파일을 불러오세요.")
-
         if dt:
             if st.button("🗑️ 현재 문서 삭제", use_container_width=True, key="del_full"):
                 confirm_delete_current()
@@ -732,7 +874,7 @@ with col1:
         if st.session_state.toc_expanded:
             render_toc(headings)
 
-    # ── 편집화면 보기 모드 ───────────────────────────────
+    # ── 편집화면 보기 모드
     else:
         st.subheader("📥 내용 편집")
         doc_title   = st.text_input("문서 제목", value=st.session_state.doc_title)
@@ -743,38 +885,38 @@ with col1:
         st.session_state.tags        = tags
         st.session_state.raw_content = raw_content
 
-        # [수정] YYYYMMDD_제목 형식 파일명 적용
         safe_filename = make_safe_filename(doc_title) if doc_title else "새문서"
         fmt_save = (f"# {doc_title}\n\n> **작성일:** {datetime.now().strftime('%Y-%m-%d')}  \n"
                     f"> **태그:** {tags}\n\n---\n\n{raw_content}")
 
-        # [수정] 버튼 3개: 내보내기 | 새작성 | 삭제
-        dl_col, new_col, del_col = st.columns([3, 1.3, 1])
-
+        dl_col, md_col, new_col, del_col = st.columns([3, 1.3, 1.3, 1])
         with dl_col:
             if st.download_button(
                 "📥 수정된 파일 바로 내보내기",
                 data=fmt_save,
-                file_name=f"{safe_filename}.md",   # ← YYYYMMDD_제목 형식
+                file_name=f"{safe_filename}.md",
                 mime="text/markdown",
                 use_container_width=True
             ):
                 save_to_recent(doc_title, tags, raw_content)
-
+        with md_col:
+            if st.button("🔄 MD변환", use_container_width=True, key="btn_md_convert",
+                        help="숫자. 항목을 ## 헤딩으로 변환하고 앞에 빈 줄을 추가합니다"):
+                converted = convert_numbered_to_markdown(raw_content)
+                st.session_state.raw_content = converted
+                st.rerun()
         with new_col:
-            # [추가] 새작성 버튼 — 클릭 시 편집화면 초기화
             if st.button("✏️ 새작성", use_container_width=True, key="btn_new_doc"):
-                st.session_state.doc_title   = ""
-                st.session_state.tags        = ""
-                st.session_state.raw_content = ""
+                st.session_state.doc_title     = ""
+                st.session_state.tags          = ""
+                st.session_state.raw_content   = ""
                 st.session_state.scroll_anchor = None
                 st.rerun()
-
         with del_col:
             if st.button("🗑️ 삭제", use_container_width=True,
-                         key="del_edit", disabled=not bool(doc_title)):
+                        key="del_edit", disabled=not bool(doc_title)):
                 confirm_delete_current()
-
+                
         st.markdown("---")
         headings = extract_headings(raw_content)
         n = len(headings)
@@ -793,12 +935,12 @@ with col1:
         if st.session_state.toc_expanded:
             render_toc(headings)
 
-# ═══════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════
 # 오른쪽 컬럼: 미리보기
-# ═══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
 with col2:
     st.subheader("👁️ 미리보기")
-
     vc1, vc2, vc3 = st.columns([1, 1, 1])
     with vc1:
         if st.button("🖥️ Full화면으로 보기", use_container_width=True):
@@ -830,11 +972,10 @@ with col2:
             unsafe_allow_html=True)
 
     st.markdown("---")
-
-    scroll_anchor              = st.session_state.scroll_anchor
+    scroll_anchor                  = st.session_state.scroll_anchor
     st.session_state.scroll_anchor = None
-    raw_content                = st.session_state.raw_content
-    doc_title                  = st.session_state.doc_title
+    raw_content                    = st.session_state.raw_content
+    doc_title                      = st.session_state.doc_title
 
     if raw_content:
         h_list = extract_headings(raw_content)
@@ -876,7 +1017,10 @@ a{{color:{'#7b8cde' if is_dark else '#2563eb'}}}
     else:
         st.markdown("*본문을 입력하면 미리보기가 표시됩니다.*")
 
-# ── 하단 저장 ────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════
+# 하단 저장
+# ══════════════════════════════════════════════════════════
 if st.button("💾 현재 내용 최근 리스트에 저장하기", use_container_width=True):
     save_to_recent(st.session_state.doc_title,
                    st.session_state.tags,
