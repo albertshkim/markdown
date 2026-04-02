@@ -13,7 +13,9 @@ import streamlit.components.v1 as components
 # from googleapiclient.http import MediaIoBaseUpload
 # from google.oauth2.service_account import Credentials  # ◀◀ 서비스 계정 전용으로 변경
 
+# 구글 API 관련 필수 모듈 3가지
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload  # ◀◀ 방금 에러를 해결할 업로드 필수 모듈
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
