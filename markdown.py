@@ -9,9 +9,14 @@ import platform
 import streamlit.components.v1 as components
 
 # streamlit용 서비스 계정 이용 경우 
+# from googleapiclient.discovery import build
+# from googleapiclient.http import MediaIoBaseUpload
+# from google.oauth2.service_account import Credentials  # ◀◀ 서비스 계정 전용으로 변경
+
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from google.oauth2.service_account import Credentials  # ◀◀ 서비스 계정 전용으로 변경
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
 
 # ══════════════════════════════════════════════════════════
 # Google Drive 설정
@@ -34,19 +39,25 @@ def make_safe_filename(title):
 
 
 def get_google_drive_service():
-    """Secrets에서 서비스 계정 정보를 읽어 구글 드라이브 서비스 반환"""
+    """Secrets에서 OAuth 토큰을 읽어 구글 드라이브 서비스 반환"""
     try:
-        # 1. st.secrets에 저장해둔 서비스 계정 정보(딕셔너리) 불러오기
-        secret_dict = dict(st.secrets["gcp_service_account"])
-        
-        # 2. 서비스 계정 인증 객체 생성
-        creds = Credentials.from_service_account_info(secret_dict, scopes=SCOPES)
-        
-        # 3. Drive API 서비스 빌드 및 반환
-        return build("drive", "v3", credentials=creds)
-        
+        if "google_token" in st.secrets:
+            token_info = dict(st.secrets["google_token"])
+            # 1. 토큰 딕셔너리로 인증 객체 생성
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+            
+            # 2. 토큰이 만료되었다면 refresh_token을 이용해 메모리상에서 즉시 갱신
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                
+            # 3. 서비스 빌드
+            return build("drive", "v3", credentials=creds)
+        else:
+            st.error("Secrets에 'google_token'이 없습니다.")
+            return None
+            
     except Exception as e:
-        st.error(f"구글 인증 실패: Secrets 설정을 확인해주세요. ({e})")
+        st.error(f"구글 인증 오류: {e}")
         return None
         
 
